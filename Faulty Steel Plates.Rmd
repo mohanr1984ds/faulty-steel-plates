@@ -1,0 +1,323 @@
+---
+title: "Final Project"
+author: "Mohan Rajendran"
+date: '`r Sys.Date()`' 
+output:
+  word_document:
+    fig_height: 4
+    fig_width: 4.5
+  pdf_document:
+    fig_height: 4
+    fig_width: 4.5
+  html_document:
+    fig_height: 4
+    fig_width: 4.5
+---
+
+
+```{r, setup, include=FALSE}
+require(mosaic)   # Load additional packages here 
+
+# Some customization.  You can alter or delete as desired (if you know what you are doing).
+trellis.par.set(theme=theme.mosaic()) # change default color scheme for lattice
+knitr::opts_chunk$set(
+  tidy=FALSE,     # display code as typed
+  size="small")   # slightly smaller font for code
+```
+
+Read the data and convert variables to factors. Rename variables so they convey the meaning properly
+```{r}
+## Read the data
+input = read.csv("faults.csv")
+##names(input)
+
+## Convert Type of Steel and Fault Type to single column
+input$TypeOfSteel <- factor(ifelse(input$TypeOfSteel_A300,'A300',
+                            ifelse(input$TypeOfSteel_A400,'A400','NA')))
+
+input$Fault_Type <- factor(ifelse(input$Pastry,'Pastry',
+                           ifelse(input$Z_Scratch,'Z_Scratch',
+                           ifelse(input$K_Scatch,'K_Scatch',
+                           ifelse(input$Stains,'Stains',
+                           ifelse(input$Dirtiness,'Dirtiness',
+                           ifelse(input$Bumps,'Bumps',
+                           ifelse(input$Other_Faults,'Other_Faults','NA'))))))))
+
+input$Outside_Global_Index <- factor(input$Outside_Global_Index)
+
+##Rearrange columns to ease scale operation
+input <- subset(input, select = -c(Pastry, Z_Scratch, K_Scatch, Stains, Dirtiness, Bumps, Other_Faults, TypeOfSteel_A300, TypeOfSteel_A400) )
+sapply(input, class)
+
+##summary(input)
+##View(input)
+
+fault_df <- cbind(subset(input, select = -c(Outside_Global_Index, TypeOfSteel, Fault_Type)),subset(input, select = c(Outside_Global_Index, TypeOfSteel, Fault_Type))) 
+View(fault_df)
+
+#fault_df <- na.omit(fault_df)
+
+```
+
+```{r}
+# read in libraries
+library(MASS)
+library(stats)
+library(randomForest)
+library(corrplot)
+library(GGally)
+#library(ISLR)
+library(nnet)
+library(dplyr)
+library(NeuralNetTools)
+```
+
+Corelation plot is examined and its found to be major issue. Considering there is little information regarding the columns and the issue with collinearity it is decided to go with Decision Trees and ANN
+```{r}
+
+table(fault_df$Fault_Type)
+## Plot Corelation 
+mydata.cor = cor(subset(fault_df, select = -c(Outside_Global_Index, TypeOfSteel, Fault_Type) ))
+corrplot(mydata.cor) 
+```
+ANN Cross Validation to select the number of nodes and decay rate
+```{r}
+set.seed(10)
+
+# CV to choose # of hidden nodes and decay rate
+n = dim(fault_df)[1]
+k = 10 #using 10-fold cross-validation
+groups=c(rep(1:k,floor(n/k)),(1:(n%%k)))
+
+decay = seq(0.5, 3, by = 0.5)
+size = seq(1, 10, by = 1)
+## In this analysis we will use accuracy to select the best model variables. A data frame is initialized to capture the values
+ANN_Accuracy_df <- data.frame(i=integer(),
+                 j=integer(),
+                 m=integer(),
+                 conv=integer(),
+                 Accuracy=double())
+
+cvgroups = sample(groups,n) 
+
+for(m in 1:length(size)){##Loop to initialize different Size values
+for(i in 1:k){
+    groupi = (cvgroups == i)
+## Scale the train and valid data sets
+    Fault.train.copy = scale(fault_df[!groupi, ][1:24])
+    Fault.train = cbind(Fault.train.copy, fault_df[!groupi, ][25:27])
+
+    Fault.valid.copy = fault_df[groupi, ][1:24]
+    Fault.valid = scale(Fault.valid.copy, center = attr(Fault.train.copy, "scaled:center"), scale = attr(Fault.train.copy, "scaled:scale"))
+    Fault.valid = cbind(Fault.valid, fault_df[groupi, ][25:27])
+
+    
+      for(j in 1:length(decay)){##Loop to initialize different decay rates
+        fit = nnet(Fault_Type ~ ., data=Fault.train, size = size[m], decay = decay[j], trace = F, maxit = 1000)
+                   ##, trace = F, linout = T, maxit = 1000)
+        FaultClass = predict(fit, Fault.valid, type = 'class')
+        confusion = table(predicted=FaultClass, actual=Fault.valid$Fault_Type)
+## Compute accuracy and store into a df
+        ANN_Accuracy_df=rbind(ANN_Accuracy_df, c(i, decay[j], size[m], fit$convergence, sum(diag(confusion))/sum(confusion)))
+
+      } # end iteration over j
+      
+    } # end iteration over k
+    
+} # end iteration over m
+
+```
+
+RandomForest Cross Validation to select the number of mtry predictor variables
+```{r}
+set.seed(10)
+
+# CV to choose # of mtry predictor variables
+n = dim(fault_df)[1]
+k = 10 #using 10-fold cross-validation
+groups=c(rep(1:k,floor(n/k)),(1:(n%%k)))
+## we will start with 5 predicot variables and loop through 26 variables
+mtry = seq(5, 26, by = 1)
+## In this analysis we will use accuracy to select the best model variables. A data frame is initialized to capture the values
+RF_Accuracy_df <- data.frame(i=integer(),
+                 j=integer(),
+                 Accuracy=double())
+
+cvgroups = sample(groups,n) 
+
+
+for(i in 1:k){
+    groupi = (cvgroups == i)
+## Scale the train and valid data sets
+    Fault.train.copy = scale(fault_df[!groupi, ][1:24])
+    Fault.train = cbind(Fault.train.copy, fault_df[!groupi, ][25:27])
+
+    Fault.valid.copy = fault_df[groupi, ][1:24]
+    Fault.valid = scale(Fault.valid.copy, center = attr(Fault.train.copy, "scaled:center"), scale = attr(Fault.train.copy, "scaled:scale"))
+    Fault.valid = cbind(Fault.valid, fault_df[groupi, ][25:27])
+    
+    for(j in 1:length(mtry)){#Loop through different mtry values
+      RFcvfit = randomForest(Fault_Type~., data=Fault.train, mtry = mtry[j], importance = T)
+      FaultClass = predict(RFcvfit, Fault.valid, type = 'class')
+        confusion = table(predicted=FaultClass, actual=Fault.valid$Fault_Type)
+## Compute accuracy and store into a df
+        RF_Accuracy_df=rbind(RF_Accuracy_df, c(i, mtry[j], sum(diag(confusion))/sum(confusion)))
+      
+      } # end iteration over j
+      
+    } # end iteration over k
+
+
+```
+
+Compute accuracy across CV
+
+```{r}
+colnames(RF_Accuracy_df) <- c('i','j','accuracy')
+colnames(ANN_Accuracy_df) <- c('i','j','m','conv','accuracy')
+RFCV <- RF_Accuracy_df %>%
+  group_by(j) %>%
+  summarize(mean_size = mean(accuracy, na.rm = TRUE))
+View(RFCV)
+
+ANNCV <- ANN_Accuracy_df %>%
+  group_by(j,m) %>%
+  summarize(mean_size = mean(accuracy, na.rm = TRUE))
+View(ANNCV)
+
+```
+
+For ANN, size value of 6 and decay rate of 0.5 provides highest classification rate
+For RandomForest, mtry value of 24 gives the highest accuracy
+
+```{r warning=FALSE}
+##### model assessment OUTER 10-fold CV (with model selection INNER 10-fold CV as part of model-fitting) #####
+
+xy.out = fault_df
+n.out = dim(xy.out)[1]
+
+#define the cross-validation splits 
+k.out = 10 
+groups.out = c(rep(1:k.out,floor(n.out/k.out)),(1:(n.out-k.out*floor(n.out/k.out))))  #produces list of group labels
+set.seed(5)
+cvgroups.out = sample(groups.out,n.out)  #orders randomly, with seed (8) 
+
+allpredictedCV.out = rep(NA,n.out)
+
+##### model assessment OUTER shell #####
+for (j in 1:k.out)  {  #be careful not to re-use loop indices
+  groupj.out = (cvgroups.out == j)
+
+  # define the training set for outer loop
+  trainxy.out = xy.out[!groupj.out,]
+  
+  #define the validation set for outer loop
+  testxy.out = xy.out[groupj.out,]
+
+  ##############################################
+  ###   model selection on trainxy.out       ###
+  ##############################################
+  ##entire model-fitting process##
+  xy.in = trainxy.out  # fixed to be fit ONLY to the training data from the outer split
+  n.in = dim(xy.in)[1]
+  ncv = 10
+  
+  x.in = model.matrix(Fault_Type~.,data=xy.in)[,-27]
+  y.in = xy.in[,27]
+
+  if ((n.in%%ncv) == 0) {
+    groups.in= rep(1:ncv,floor(n.in/ncv))} else {
+      groups.in=c(rep(1:ncv,floor(n.in/ncv)),(1:(n.in%%ncv)))
+    }
+  cvgroups.in = sample(groups.in,n.in)
+  
+  # set up storage
+  allpredictedcv10 = matrix(ncol=2,nrow=n.in)
+  
+  # with model selection 
+  for (i in 1:ncv) {
+    newdata.in = xy.in[cvgroups.in==i,]
+
+    log2fit = nnet(Fault_Type ~ ., data=xy.in[cvgroups.in!=i,], size = 6, decay = 0.5, trace = F, maxit = 1000)
+    log2prob = predict(log2fit,newdata.in,type="class")
+    allpredictedcv10[cvgroups.in==i,1] = log2prob
+    
+    RFcvfit = randomForest(Fault_Type~., data = xy.in[cvgroups.in!=i,], mtry = 24, importance = T)
+    RFprob = predict(RFcvfit,newdata.in,type="class")
+    allpredictedcv10[cvgroups.in==i,2] = RFprob
+  }   
+
+        
+  #compute the CV values
+  allcv10 = rep(0,2)
+  for (m in 1:2) allcv10[m] = sum(xy.in$Fault_Type!=allpredictedcv10[,m])/n.in
+  bestmodels = (1:2)[allcv10 == min(allcv10)]
+  bestmodels
+
+##############################################
+  ###   resulting in bestmodels              ###
+  ##############################################
+
+  bestmodel = ifelse(length(bestmodels)==1,bestmodels,sample(bestmodels,1))
+  print(allcv10)
+  print(paste("Best model at outer loop",j,"is",bestmodel))
+
+  if (bestmodel == 1)  {
+    log2fit.train = nnet(Fault_Type ~ ., data=trainxy.out, size = 6, decay = 0.5, trace = F, maxit = 1000)
+    
+    log2prob.test = predict(log2fit.train,testxy.out,type="class")
+    predictvalid = log2prob.test 
+    
+  }
+  if (bestmodel == 2)  {
+    RFfit.train = randomForest(Fault_Type~., data = trainxy.out, mtry = 24, importance = T)
+    RFprob.test = predict(RFfit.train,testxy.out,type="class")
+    predictvalid = RFprob.test 
+    
+  }
+  
+  allpredictedCV.out[groupj.out] = predictvalid
+
+}
+
+# the output shows the different models selected in the outer loop - purpose is only to observe processing 
+
+```
+
+Full Model fitting
+```{r}
+
+fault_df.stdcopy = scale(fault_df[1:24])
+fault_df.std = cbind(fault_df.stdcopy, fault_df[25:27])
+
+FinalFit = nnet(Fault_Type ~ ., data=fault_df.std, size = 6, decay = 0.5, trace = F, maxit = 1000)
+summary(FinalFit)
+
+```
+
+Calculate the classification rate and confusion matrix
+```{r}
+FinalClass = predict(FinalFit, fault_df.std, type = 'class')
+confusion = table(predicted=FinalClass, actual=fault_df.std$Fault_Type)
+sum(diag(confusion))/sum(confusion)
+confusion
+```
+The model has accuracy rate of 76.3%
+
+Plot the neural network
+```{r}
+library(NeuralNetTools)
+plotnet(FinalFit)
+```
+Principal Component Analysis of the variables
+```{r}
+pc.info = prcomp(fault_df[1:24],center=T,scale=T)
+##pc.info$rotation  #loadings
+summary(pc.info)
+```
+10 components explains more than 90% of the variability in the data
+```{r}
+library(factoextra)
+
+fviz_contrib(pc.info, choice = "var", axes = 1:10)
+```
